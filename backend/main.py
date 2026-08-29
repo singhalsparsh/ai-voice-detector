@@ -1,17 +1,21 @@
 # main.py - DeepfakeGuard Voice Detection Backend
 # Serves both /api/detect (frontend) and /api/v1/detect (original) endpoints
+# Plus WebSocket endpoint for real-time live detection
 import os
+import json
+import base64
 import tempfile
 import torch
 import librosa
 import numpy as np
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from transformers import AutoModelForAudioClassification, AutoFeatureExtractor
 from pathlib import Path
 import uvicorn
+
 
 # --- App Initialization -------------------------------------
 app = FastAPI(
@@ -41,7 +45,7 @@ class DetectionMetrics(BaseModel):
 
 class DetectionResponse(BaseModel):
     is_ai: bool
-    isAuthentic: bool  # Frontend alias (inverse of is_ai)
+    isAuthentic: bool
     confidence: float
     metrics: DetectionMetrics
     filename: str
@@ -65,22 +69,17 @@ except Exception as e:
 def calculate_metrics(audio, sr, ai_probability):
     """Calculate acoustic metrics from audio"""
     try:
-        # Spectral features
         spectral_centroid = librosa.feature.spectral_centroid(y=audio, sr=sr)[0]
         spectral_rolloff = librosa.feature.spectral_rolloff(y=audio, sr=sr)[0]
         spectral_bandwidth = librosa.feature.spectral_bandwidth(y=audio, sr=sr)[0]
         zero_crossing_rate = librosa.feature.zero_crossing_rate(audio)[0]
         rms_energy = librosa.feature.rms(y=audio)[0]
-        
-        # MFCC features
         mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
         mfcc_var = float(np.var(mfccs.T, axis=0).mean())
-        
-        # Pitch analysis
         pitches, magnitudes = librosa.piptrack(y=audio, sr=sr)
         pitch_vals = pitches[pitches > 0]
         pitch_anomaly = float(np.std(pitch_vals) / 100) if len(pitch_vals) > 0 else 0.0
-        
+
         return DetectionMetrics(
             pitch_anomaly=round(pitch_anomaly, 4),
             spectral_centroid=round(float(np.mean(spectral_centroid)), 2),
@@ -93,13 +92,9 @@ def calculate_metrics(audio, sr, ai_probability):
     except Exception as e:
         print(f"Metrics error: {e}")
         return DetectionMetrics(
-            pitch_anomaly=0.0,
-            spectral_centroid=0.0,
-            mfcc_variance=0.0,
-            zero_crossing_rate=0.0,
-            spectral_rolloff=0.0,
-            spectral_bandwidth=0.0,
-            rms_energy=0.0
+            pitch_anomaly=0.0, spectral_centroid=0.0, mfcc_variance=0.0,
+            zero_crossing_rate=0.0, spectral_rolloff=0.0,
+            spectral_bandwidth=0.0, rms_energy=0.0
         )
 
 
@@ -112,7 +107,6 @@ async def _detect_handler(file: UploadFile):
             detail="Model not loaded. Please check the model repository."
         )
 
-    # Check file type
     ext = Path(file.filename or "").suffix.lower().lstrip(".")
     allowed_exts = {"mp3", "wav", "flac", "ogg", "m4a", "aac"}
     allowed_mimes = {
@@ -128,55 +122,35 @@ async def _detect_handler(file: UploadFile):
                    f"Accepted: MP3, WAV, FLAC, OGG, M4A, AAC"
         )
 
-    # Check file size (25 MB max)
     contents = await file.read()
     if len(contents) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Maximum is 25 MB.")
-
     if len(contents) < 100:
         raise HTTPException(status_code=400, detail="File is empty or too small.")
 
-    # --- Process Audio --------------------------------------
     suffix = Path(file.filename or "audio.wav").suffix or ".wav"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(contents)
         tmp_path = tmp.name
 
     try:
-        # Load audio
         audio, sr = librosa.load(tmp_path, sr=16000, mono=True)
         duration = len(audio) / sr
-        
-        # Process for model
-        inputs = feature_extractor(
-            audio, 
-            sampling_rate=16000, 
-            return_tensors="pt", 
-            padding=True
-        )
-        
-        # Predict
+        inputs = feature_extractor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
         with torch.no_grad():
             outputs = model(**inputs)
             probs = torch.softmax(outputs.logits, dim=-1)
-        
-        # Get results
         is_ai = bool(probs[0, 1].item() > 0.5)
         confidence = float(max(probs[0]).item() * 100)
-        
-        # Calculate metrics
         metrics = calculate_metrics(audio, sr, probs[0, 1].item())
-        
+
         return DetectionResponse(
-            is_ai=is_ai,
-            isAuthentic=not is_ai,
-            confidence=round(confidence, 1),
-            metrics=metrics,
+            is_ai=is_ai, isAuthentic=not is_ai,
+            confidence=round(confidence, 1), metrics=metrics,
             filename=file.filename or "unknown",
             duration_seconds=round(duration, 2),
             model_used="Wav2Vec2 Deepfake Detector"
         )
-
     except HTTPException:
         raise
     except Exception as e:
@@ -221,24 +195,38 @@ async def detect_audio_frontend(file: UploadFile = File(..., alias="audio")):
 # Original backend route (accepts 'file' field)
 @app.post("/api/v1/detect", response_model=DetectionResponse)
 async def detect_audio_v1(file: UploadFile = File(...)):
-    """Original backend endpoint: accepts 'file' form field"""
+    """Original backend endpoint: accepts 'file' field"""
     return await _detect_handler(file)
 
 
-# --- Main Entry Point --------------------------------------
-if __name__ == "__main__":
-    print("=" * 60)
-    print("DeepfakeGuard - Voice Detection API")
-    print(f"   Model: {'LOADED' if model else 'NOT LOADED'}")
-    if model:
-        print(f"   Model: {MODEL_ID}")
-        print(f"   Accuracy: 95%+")
-    print(f"   Server: http://localhost:8000")
-    print(f"   Endpoints:")
-    print(f"     POST /api/detect       (frontend)")
-    print(f"     POST /api/v1/detect    (original)")
-    print(f"     GET  /health           (health check)")
-    print("=" * 60)
-    print("Press CTRL+C to stop")
+# --- WebSocket Endpoint for Live Detection ------------------
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.websocket("/ws/detect")
+async def websocket_detect(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time live voice detection.
+
+    Protocol:
+      Client -> Server: { "chunk": "<base64_wav_audio>" }
+      Client -> Server: { "end": true }
+      Server -> Client: { "partial": true, "received_bytes": int }
+      Server -> Client: { "final": true, "result": { ... } }
+    """
+    await websocket.accept()
+    audio_chunks = []
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+
+            if message.get("end"):
+                if not audio_chunks:
+                    await websocket.send_json({"error": "No audio data received"})
+                    break
+
+                combined = b"".join(audio_chunks)
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                    tmp.write(combined)
+                    tmp_path = 

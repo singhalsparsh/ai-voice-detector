@@ -21,7 +21,7 @@ DeepfakeGuard is a frontend acoustic forensics and voice authenticity detection 
 
 ---
 
-## 🐍 Python Backend Integration Guide
+## Python Backend Integration Guide
 
 The frontend is ready to communicate with your custom Python model (`FastAPI`, `Flask`, `PyTorch`, `HuggingFace Wav2Vec2`).
 
@@ -64,7 +64,7 @@ When your Python model finishes analyzing the audio, return the following JSON s
 
 ---
 
-## 💻 Python Backend Starter Code (`main.py`)
+## Python Backend Starter Code (`main.py`)
 
 Here is an example `main.py` using **FastAPI** and **PyTorch / Transformers** (`Wav2Vec2ForSequenceClassification` / custom acoustic model):
 

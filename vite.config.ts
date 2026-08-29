@@ -23,6 +23,11 @@ export default defineConfig(() => {
           target: 'http://localhost:8000',
           changeOrigin: true,
         },
+        // Forward WebSocket connections for live detection
+        '/ws': {
+          target: 'ws://localhost:8000',
+          ws: true,
+        },
       },
     },
   };
